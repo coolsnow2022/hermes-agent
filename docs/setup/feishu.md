@@ -26,15 +26,18 @@
 
 | 权限 | 是否必须 | 用途 |
 |------|---------|------|
-| `im:message` | 必须 | 接收消息 |
+| `im:message:receive_v1` | 必须 | 读取用户发给机器人的单聊消息 |
 | `im:message:send_as_bot` | 必须 | 发送消息 |
+| `im:chat:readonly` | 必须 | 读取群组信息（获取会话详情） |
 | `im:resource` | 推荐 | 接收图片/文件 |
 | `application:application:self_manage` | 推荐 | Bot 身份识别，消除启动警告 |
 | `card.action.trigger` | 可选 | 支持交互卡片 |
 
+> **注意**：`im:message:receive_v1`（单聊）和群组@提及权限是独立的，两者都要开通才能同时支持单聊和群组消息。
+
 ### 4. 订阅事件（WebSocket 模式必须）
 
-应用后台 → **事件订阅** → 添加：
+应用后台 → **事件与回调** → **事件订阅** → 接收方式选择**「使用长连接接收事件」**（默认是 HTTP，必须手动切换）→ 添加事件：
 - `im.message.receive_v1`（接收消息）
 
 ### 5. 发布应用
@@ -113,6 +116,9 @@ hermes gateway
 |------|------|---------|
 | `1000040347: store apps are not supported yet` | 使用了商店应用 | 重建为自建应用 |
 | `Unable to hydrate bot identity` | 缺少身份识别权限 | 添加 `application:application:self_manage` 权限，或手动设置 `FEISHU_BOT_NAME` |
+| 单聊发消息无日志、无响应 | 事件订阅接收方式未切换 | 事件订阅页面切换为「使用长连接接收事件」并重新发布 |
+| 单聊发消息无响应（有日志） | 缺少单聊读取权限 | 添加 `im:message:receive_v1` 权限并发布 |
+| `Failed to get chat info ... im:chat:readonly` | 缺少群组信息权限 | 添加 `im:chat:readonly` 权限并发布 |
 | 机器人不响应 | 权限/事件未生效 | 检查是否已发布新版本 |
 | 群组中不响应 | 白名单限制 | 检查 `FEISHU_GROUP_POLICY` 和 `FEISHU_ALLOWED_USERS` |
 | 收不到图片/文件 | 缺少权限 | 添加 `im:resource` 权限 |
