@@ -39,6 +39,7 @@ _EXTRA_ENV_KEYS = frozenset({
     "DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET",
     "FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_ENCRYPT_KEY", "FEISHU_VERIFICATION_TOKEN",
     "WECOM_BOT_ID", "WECOM_SECRET",
+    "BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD",
     "TERMINAL_ENV", "TERMINAL_SSH_KEY", "TERMINAL_SSH_PORT",
     "WHATSAPP_MODE", "WHATSAPP_ENABLED",
     "MATTERMOST_HOME_CHANNEL", "MATTERMOST_REPLY_MODE",
@@ -230,6 +231,10 @@ DEFAULT_CONFIG = {
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Staged inactivity warning: send a warning to the user at this
+        # threshold before escalating to a full timeout.  The warning fires
+        # once per run and does not interrupt the agent.  0 = disable warning.
+        "gateway_timeout_warning": 900,
     },
     
     "terminal": {
