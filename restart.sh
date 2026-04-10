@@ -24,6 +24,13 @@ else
     echo "==> Dependencies unchanged, skipping install."
 fi
 
+# Stop any running gateway instances
+if pgrep -f "hermes gateway" > /dev/null; then
+    echo "==> Stopping existing hermes gateway..."
+    pkill -f "hermes gateway"
+    sleep 2
+fi
+
 # Start gateway
 echo "==> Starting hermes gateway..."
 hermes gateway
