@@ -45,12 +45,21 @@ class ToolEntry:
         self.max_result_size_chars = max_result_size_chars
 
 
+import time
+from functools import lru_cache
+
 class ToolRegistry:
     """Singleton registry that collects tool schemas + handlers from tool files."""
 
     def __init__(self):
         self._tools: Dict[str, ToolEntry] = {}
         self._toolset_checks: Dict[str, Callable] = {}
+        # 工具可用性检查缓存，有效期5分钟
+        self._check_cache: Dict[Callable, bool] = {}
+        self._cache_last_updated: float = 0
+        self._cache_ttl: int = 300  # 5分钟
+        # 预序列化的schema缓存
+        self._schema_cache: Dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Registration
@@ -91,6 +100,13 @@ class ToolRegistry:
         )
         if check_fn and toolset not in self._toolset_checks:
             self._toolset_checks[toolset] = check_fn
+        # 预生成OpenAI格式的schema缓存
+        self._schema_cache[name] = {"type": "function", "function": {**schema, "name": name}}
+
+    def invalidate_check_cache(self) -> None:
+        """Invalidate the tool availability check cache."""
+        self._check_cache.clear()
+        self._cache_last_updated = 0
 
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
@@ -102,11 +118,15 @@ class ToolRegistry:
         entry = self._tools.pop(name, None)
         if entry is None:
             return
+        # 清除对应的schema缓存
+        self._schema_cache.pop(name, None)
         # Drop the toolset check if this was the last tool in that toolset
         if entry.toolset in self._toolset_checks and not any(
             e.toolset == entry.toolset for e in self._tools.values()
         ):
             self._toolset_checks.pop(entry.toolset, None)
+            # 清除该工具集对应的检查缓存
+            self._check_cache = {k: v for k, v in self._check_cache.items() if k != self._toolset_checks.get(entry.toolset)}
         logger.debug("Deregistered tool: %s", name)
 
     # ------------------------------------------------------------------
@@ -120,26 +140,31 @@ class ToolRegistry:
         are included.
         """
         result = []
-        check_results: Dict[Callable, bool] = {}
+        # 检查缓存是否过期
+        current_time = time.time()
+        if current_time - self._cache_last_updated > self._cache_ttl:
+            self._check_cache.clear()
+            self._cache_last_updated = current_time
+
         for name in sorted(tool_names):
             entry = self._tools.get(name)
             if not entry:
                 continue
             if entry.check_fn:
-                if entry.check_fn not in check_results:
+                if entry.check_fn not in self._check_cache:
                     try:
-                        check_results[entry.check_fn] = bool(entry.check_fn())
+                        self._check_cache[entry.check_fn] = bool(entry.check_fn())
                     except Exception:
-                        check_results[entry.check_fn] = False
+                        self._check_cache[entry.check_fn] = False
                         if not quiet:
                             logger.debug("Tool %s check raised; skipping", name)
-                if not check_results[entry.check_fn]:
+                if not self._check_cache[entry.check_fn]:
                     if not quiet:
                         logger.debug("Tool %s unavailable (check failed)", name)
                     continue
-            # Ensure schema always has a "name" field — use entry.name as fallback
-            schema_with_name = {**entry.schema, "name": entry.name}
-            result.append({"type": "function", "function": schema_with_name})
+            # 直接返回预缓存的schema
+            if name in self._schema_cache:
+                result.append(self._schema_cache[name])
         return result
 
     # ------------------------------------------------------------------
@@ -215,10 +240,20 @@ class ToolRegistry:
         check = self._toolset_checks.get(toolset)
         if not check:
             return True
+        # 检查缓存是否过期
+        current_time = time.time()
+        if current_time - self._cache_last_updated > self._cache_ttl:
+            self._check_cache.clear()
+            self._cache_last_updated = current_time
+        if check in self._check_cache:
+            return self._check_cache[check]
         try:
-            return bool(check())
+            result = bool(check())
+            self._check_cache[check] = result
+            return result
         except Exception:
             logger.debug("Toolset %s check raised; marking unavailable", toolset)
+            self._check_cache[check] = False
             return False
 
     def check_toolset_requirements(self) -> Dict[str, bool]:
