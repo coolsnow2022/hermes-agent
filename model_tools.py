@@ -32,22 +32,6 @@ from toolsets import resolve_toolset, validate_toolset
 logger = logging.getLogger(__name__)
 
 
-# 工具参数schema缓存，避免每次调用都从registry重复获取
-_tool_schema_cache: Dict[str, dict] = {}
-# 全局复用的线程池，用于异步工具调用
-_global_thread_pool = None
-_thread_pool_lock = threading.Lock()
-
-def _get_global_thread_pool():
-    """获取全局线程池实例，懒加载创建"""
-    global _global_thread_pool
-    with _thread_pool_lock:
-        if _global_thread_pool is None:
-            import concurrent.futures
-            # 默认线程池大小为CPU核心数*2
-            _global_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2* (os.cpu_count() or 4))
-    return _global_thread_pool
-
 # =============================================================================
 # Async Bridging  (single source of truth -- used by registry.dispatch too)
 # =============================================================================
@@ -123,9 +107,10 @@ def _run_async(coro):
 
     if loop and loop.is_running():
         # Inside an async context (gateway, RL env) — run in a fresh thread.
-        pool = _get_global_thread_pool()
-        future = pool.submit(asyncio.run, coro)
-        return future.result(timeout=300)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=300)
 
     # If we're on a worker thread (e.g., parallel tool execution in
     # delegate_task), use a per-thread persistent loop.  This avoids
@@ -361,26 +346,12 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if not args or not isinstance(args, dict):
         return args
 
-    # 优先从缓存获取schema
-    schema = _tool_schema_cache.get(tool_name)
+    schema = registry.get_schema(tool_name)
     if not schema:
-        schema = registry.get_schema(tool_name)
-        if schema:
-            _tool_schema_cache[tool_name] = schema
-        else:
-            return args
+        return args
 
     properties = (schema.get("parameters") or {}).get("properties")
     if not properties:
-        return args
-
-    # 快速路径：检查是否有需要coerce的参数
-    need_coerce = False
-    for key, value in args.items():
-        if isinstance(value, str) and key in properties:
-            need_coerce = True
-            break
-    if not need_coerce:
         return args
 
     for key, value in args.items():
@@ -455,6 +426,7 @@ def handle_function_call(
     session_id: Optional[str] = None,
     user_task: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
+    skip_pre_tool_call_hook: bool = False,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -475,31 +447,32 @@ def handle_function_call(
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
 
-    # Notify the read-loop tracker when a non-read/search tool runs,
-    # so the *consecutive* counter resets (reads after other work are fine).
-    if function_name not in _READ_SEARCH_TOOLS:
-        try:
-            from tools.file_tools import notify_other_tool_call
-            notify_other_tool_call(task_id or "default")
-        except Exception:
-            pass  # file_tools may not be loaded yet
-
     try:
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 
-        # 快速路径：无注册插件时跳过钩子调用
-        has_plugins = True
-        try:
-            from hermes_cli.plugins import has_hooks
-            has_plugins = has_hooks("pre_tool_call") or has_hooks("post_tool_call")
-        except ImportError:
-            # 没有has_hooks函数时，默认执行钩子调用（兼容旧版本）
-            has_plugins = True
-        except Exception:
-            pass
+        # Check plugin hooks for a block directive (unless caller already
+        # checked — e.g. run_agent._invoke_tool passes skip=True to
+        # avoid double-firing the hook).
+        if not skip_pre_tool_call_hook:
+            block_message: Optional[str] = None
+            try:
+                from hermes_cli.plugins import get_pre_tool_call_block_message
+                block_message = get_pre_tool_call_block_message(
+                    function_name,
+                    function_args,
+                    task_id=task_id or "",
+                    session_id=session_id or "",
+                    tool_call_id=tool_call_id or "",
+                )
+            except Exception:
+                pass
 
-        if has_plugins:
+            if block_message is not None:
+                return json.dumps({"error": block_message}, ensure_ascii=False)
+        else:
+            # Still fire the hook for observers — just don't check for blocking
+            # (the caller already did that).
             try:
                 from hermes_cli.plugins import invoke_hook
                 invoke_hook(
@@ -512,6 +485,15 @@ def handle_function_call(
                 )
             except Exception:
                 pass
+
+        # Notify the read-loop tracker when a non-read/search tool runs,
+        # so the *consecutive* counter resets (reads after other work are fine).
+        if function_name not in _READ_SEARCH_TOOLS:
+            try:
+                from tools.file_tools import notify_other_tool_call
+                notify_other_tool_call(task_id or "default")
+            except Exception:
+                pass  # file_tools may not be loaded yet
 
         if function_name == "execute_code":
             # Prefer the caller-provided list so subagents can't overwrite
@@ -529,20 +511,19 @@ def handle_function_call(
                 user_task=user_task,
             )
 
-        if has_plugins:
-            try:
-                from hermes_cli.plugins import invoke_hook
-                invoke_hook(
-                    "post_tool_call",
-                    tool_name=function_name,
-                    args=function_args,
-                    result=result,
-                    task_id=task_id or "",
-                    session_id=session_id or "",
-                    tool_call_id=tool_call_id or "",
-                )
-            except Exception:
-                pass
+        try:
+            from hermes_cli.plugins import invoke_hook
+            invoke_hook(
+                "post_tool_call",
+                tool_name=function_name,
+                args=function_args,
+                result=result,
+                task_id=task_id or "",
+                session_id=session_id or "",
+                tool_call_id=tool_call_id or "",
+            )
+        except Exception:
+            pass
 
         return result
 
